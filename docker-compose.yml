@@ -1,0 +1,147 @@
+version: '3.8'
+
+services:
+  rs-health-monitor:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: rs-health-monitor
+    environment:
+      # Database Configuration
+      - DATABASE_URL=${DATABASE_URL}
+
+      # Django Settings
+      - DJANGO_SETTINGS_MODULE=${DJANGO_SETTINGS_MODULE:-rs_systems.settings}
+      - DJANGO_SECRET_KEY=${DJANGO_SECRET_KEY}
+
+      # AWS Configuration
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_REGION=${AWS_REGION:-us-east-1}
+      - S3_BUCKET_NAME=${S3_BUCKET_NAME}
+
+      # Monitoring Configuration
+      - MONITORING_INTERVAL_SECONDS=${MONITORING_INTERVAL_SECONDS:-30}
+      - HEALTH_CHECK_INTERVAL_SECONDS=${HEALTH_CHECK_INTERVAL_SECONDS:-60}
+
+      # Alert Configuration
+      - ALERT_ENABLED=${ALERT_ENABLED:-true}
+      - SLACK_WEBHOOK_URL=${SLACK_WEBHOOK_URL}
+      - EMAIL_ALERT_ENABLED=${EMAIL_ALERT_ENABLED:-false}
+      - EMAIL_ALERT_TO=${EMAIL_ALERT_TO}
+
+      # Thresholds
+      - ALERT_THRESHOLD_DB_QUERY_MS=${ALERT_THRESHOLD_DB_QUERY_MS:-500}
+      - ALERT_THRESHOLD_QUEUE_STUCK_HOURS=${ALERT_THRESHOLD_QUEUE_STUCK_HOURS:-24}
+      - ALERT_THRESHOLD_API_RESPONSE_MS=${ALERT_THRESHOLD_API_RESPONSE_MS:-2000}
+      - ALERT_THRESHOLD_S3_STORAGE_GB=${ALERT_THRESHOLD_S3_STORAGE_GB:-100}
+
+      # Feature Flags
+      - ENABLE_DATABASE_MONITORING=${ENABLE_DATABASE_MONITORING:-true}
+      - ENABLE_API_MONITORING=${ENABLE_API_MONITORING:-true}
+      - ENABLE_QUEUE_MONITORING=${ENABLE_QUEUE_MONITORING:-true}
+      - ENABLE_S3_MONITORING=${ENABLE_S3_MONITORING:-true}
+      - ENABLE_ACTIVITY_MONITORING=${ENABLE_ACTIVITY_MONITORING:-true}
+
+      # Logging
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+
+      # Environment
+      - ENVIRONMENT=${ENVIRONMENT:-development}
+    volumes:
+      # Mount logs directory for persistence
+      - ./logs:/var/log/rs-health-monitor
+      # Mount configuration if using file-based config
+      - ./.env:/app/.env:ro
+      # Mount SQLite database from rs_systems project
+      - /Users/drakeduncan/projects/rs_systems_branch2/db.sqlite3:/app/data/db.sqlite3:ro
+    ports:
+      # Expose MCP server port if using TCP transport
+      - "${MCP_SERVER_PORT:-8080}:8080"
+      # Expose WebSocket port if enabled
+      - "${MCP_WEBSOCKET_PORT:-8081}:8081"
+    restart: unless-stopped
+    depends_on:
+      - redis
+    networks:
+      - rs-health-network
+    labels:
+      - "traefik.enable=false"
+      - "com.rs-systems.service=health-monitor"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import asyncio; from src.server import RSHealthMonitorServer; print('Health check passed')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # Optional Redis for caching metrics (if enabled)
+  redis:
+    image: redis:7-alpine
+    container_name: rs-health-redis
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+    networks:
+      - rs-health-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # Optional Prometheus for metrics (if monitoring with Prometheus)
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: rs-health-prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.enable-lifecycle'
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    networks:
+      - rs-health-network
+    profiles:
+      - monitoring
+
+  # Optional Grafana for visualization
+  grafana:
+    image: grafana/grafana:latest
+    container_name: rs-health-grafana
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning
+    networks:
+      - rs-health-network
+    profiles:
+      - monitoring
+
+volumes:
+  redis_data:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local
+
+networks:
+  rs-health-network:
+    driver: bridge
+    name: rs-health-network
