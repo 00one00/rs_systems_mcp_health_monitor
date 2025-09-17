@@ -21,17 +21,35 @@ class QueueMonitor:
 
     async def get_queue_status(self) -> Dict[str, Any]:
         """Get current repair queue status."""
-        query = """
-        SELECT
-            queue_status,
-            COUNT(*) as count,
-            AVG(EXTRACT(EPOCH FROM (now() - created_at)) / 3600) as avg_age_hours,
-            MAX(EXTRACT(EPOCH FROM (now() - created_at)) / 3600) as max_age_hours,
-            MIN(EXTRACT(EPOCH FROM (now() - created_at)) / 3600) as min_age_hours
-        FROM technician_portal_repair
-        WHERE queue_status != 'COMPLETED'
-        GROUP BY queue_status
-        """
+        # Check database type
+        is_sqlite = 'sqlite' in settings.database.database_url.lower()
+
+        if is_sqlite:
+            # SQLite-compatible query
+            query = """
+            SELECT
+                queue_status,
+                COUNT(*) as count,
+                AVG((julianday('now') - julianday(repair_date)) * 24) as avg_age_hours,
+                MAX((julianday('now') - julianday(repair_date)) * 24) as max_age_hours,
+                MIN((julianday('now') - julianday(repair_date)) * 24) as min_age_hours
+            FROM technician_portal_repair
+            WHERE queue_status != 'COMPLETED'
+            GROUP BY queue_status
+            """
+        else:
+            # PostgreSQL query
+            query = """
+            SELECT
+                queue_status,
+                COUNT(*) as count,
+                AVG(EXTRACT(EPOCH FROM (now() - created_at)) / 3600) as avg_age_hours,
+                MAX(EXTRACT(EPOCH FROM (now() - created_at)) / 3600) as max_age_hours,
+                MIN(EXTRACT(EPOCH FROM (now() - created_at)) / 3600) as min_age_hours
+            FROM technician_portal_repair
+            WHERE queue_status != 'COMPLETED'
+            GROUP BY queue_status
+            """
 
         queue_status = {}
         try:
@@ -56,33 +74,64 @@ class QueueMonitor:
     async def get_stuck_repairs(self) -> List[Dict[str, Any]]:
         """Identify repairs that have been stuck in the same status for too long."""
         threshold_hours = self.thresholds.queue_stuck_hours
+        is_sqlite = 'sqlite' in settings.database.database_url.lower()
 
-        query = """
-        SELECT
-            r.id,
-            r.unit_number,
-            r.queue_status,
-            r.created_at,
-            r.updated_at,
-            c.name as customer_name,
-            t.id as technician_id,
-            u.username as technician_name,
-            EXTRACT(EPOCH FROM (now() - r.updated_at)) / 3600 as stuck_hours
-        FROM technician_portal_repair r
-        LEFT JOIN core_customer c ON r.customer_id = c.id
-        LEFT JOIN technician_portal_technician t ON r.technician_id = t.id
-        LEFT JOIN auth_user u ON t.user_id = u.id
-        WHERE r.queue_status NOT IN ('COMPLETED', 'DENIED')
-            AND r.updated_at < now() - interval '%s hours'
-        ORDER BY r.updated_at ASC
-        LIMIT 50
-        """
+        if is_sqlite:
+            # SQLite-compatible query
+            query = f"""
+            SELECT
+                r.id,
+                r.unit_number,
+                r.queue_status,
+                r.repair_date,
+                r.repair_date as updated_at,
+                c.name as customer_name,
+                t.id as technician_id,
+                u.username as technician_name,
+                (julianday('now') - julianday(r.repair_date)) * 24 as stuck_hours
+            FROM technician_portal_repair r
+            LEFT JOIN core_customer c ON r.customer_id = c.id
+            LEFT JOIN technician_portal_technician t ON r.technician_id = t.id
+            LEFT JOIN auth_user u ON t.user_id = u.id
+            WHERE r.queue_status NOT IN ('COMPLETED', 'DENIED')
+                AND r.repair_date < datetime('now', '-{threshold_hours} hours')
+            ORDER BY r.updated_at ASC
+            LIMIT 50
+            """
+            # For SQLite, we don't need parameters
+            query_params = None
+        else:
+            # PostgreSQL query
+            query = """
+            SELECT
+                r.id,
+                r.unit_number,
+                r.queue_status,
+                r.repair_date,
+                r.repair_date as updated_at,
+                c.name as customer_name,
+                t.id as technician_id,
+                u.username as technician_name,
+                EXTRACT(EPOCH FROM (now() - r.repair_date)) / 3600 as stuck_hours
+            FROM technician_portal_repair r
+            LEFT JOIN core_customer c ON r.customer_id = c.id
+            LEFT JOIN technician_portal_technician t ON r.technician_id = t.id
+            LEFT JOIN auth_user u ON t.user_id = u.id
+            WHERE r.queue_status NOT IN ('COMPLETED', 'DENIED')
+                AND r.repair_date < now() - interval '%s hours'
+            ORDER BY r.repair_date ASC
+            LIMIT 50
+            """
+            query_params = (threshold_hours,)
 
         stuck_repairs = []
         try:
             with self.db_monitor.get_connection() as conn:
                 with conn.cursor() as cursor:
-                    cursor.execute(query, (threshold_hours,))
+                    if query_params:
+                        cursor.execute(query, query_params)
+                    else:
+                        cursor.execute(query)
                     rows = cursor.fetchall()
 
                     for row in rows:

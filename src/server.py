@@ -14,7 +14,7 @@ from .monitors.database import DatabaseMonitor
 from .monitors.api import APIMonitor
 from .monitors.queue import QueueMonitor
 from .monitors.storage import StorageMonitor
-from .monitors.activity import ActivityMonitor
+from .monitors.activity_simple import ActivityMonitor
 from .alerts import AlertManager
 from .models.django_models import MonitoringQuery
 
@@ -31,12 +31,64 @@ class RSHealthMonitorServer:
 
     def __init__(self):
         self.server = Server(settings.mcp.server_name)
-        self.db_monitor = DatabaseMonitor() if settings.features.enable_database_monitoring else None
-        self.api_monitor = APIMonitor() if settings.features.enable_api_monitoring else None
-        self.queue_monitor = QueueMonitor(self.db_monitor) if settings.features.enable_queue_monitoring and self.db_monitor else None
-        self.storage_monitor = StorageMonitor() if settings.features.enable_s3_monitoring else None
-        self.activity_monitor = ActivityMonitor(self.db_monitor) if settings.features.enable_activity_monitoring and self.db_monitor else None
-        self.alert_manager = AlertManager()
+
+        # Initialize monitors with error handling
+        self.db_monitor = None
+        if settings.features.enable_database_monitoring:
+            try:
+                self.db_monitor = DatabaseMonitor()
+                logger.info("Database monitor initialized successfully")
+            except Exception as e:
+                logger.error(f"Failed to initialize database monitor: {e}")
+                self.db_monitor = None
+
+        self.api_monitor = None
+        if settings.features.enable_api_monitoring:
+            try:
+                self.api_monitor = APIMonitor()
+                logger.info("API monitor initialized successfully")
+            except Exception as e:
+                logger.error(f"Failed to initialize API monitor: {e}")
+                self.api_monitor = None
+
+        self.queue_monitor = None
+        if settings.features.enable_queue_monitoring and self.db_monitor:
+            try:
+                self.queue_monitor = QueueMonitor(self.db_monitor)
+                logger.info("Queue monitor initialized successfully")
+            except Exception as e:
+                logger.error(f"Failed to initialize queue monitor: {e}")
+                self.queue_monitor = None
+        elif settings.features.enable_queue_monitoring:
+            logger.warning("Queue monitoring is enabled but database monitor is not available")
+
+        self.storage_monitor = None
+        if settings.features.enable_s3_monitoring:
+            try:
+                self.storage_monitor = StorageMonitor()
+                logger.info("Storage monitor initialized successfully")
+            except Exception as e:
+                logger.error(f"Failed to initialize storage monitor: {e}")
+                logger.info("S3 monitoring disabled due to initialization error")
+                self.storage_monitor = None
+
+        self.activity_monitor = None
+        if settings.features.enable_activity_monitoring and self.db_monitor:
+            try:
+                self.activity_monitor = ActivityMonitor(self.db_monitor)
+                logger.info("Activity monitor initialized successfully")
+            except Exception as e:
+                logger.error(f"Failed to initialize activity monitor: {e}")
+                self.activity_monitor = None
+        elif settings.features.enable_activity_monitoring:
+            logger.warning("Activity monitoring is enabled but database monitor is not available")
+
+        try:
+            self.alert_manager = AlertManager()
+            logger.info("Alert manager initialized successfully")
+        except Exception as e:
+            logger.error(f"Failed to initialize alert manager: {e}")
+            self.alert_manager = None
 
         # Background monitoring task
         self.monitoring_task = None
